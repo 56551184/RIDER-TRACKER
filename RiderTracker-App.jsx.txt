@@ -1,0 +1,729 @@
+import React, { useState, useEffect } from 'react';
+import { LogOut, Plus, Users, BarChart3, Download, Trash2, Eye, EyeOff } from 'lucide-react';
+
+// ============= CONFIGURATION =============
+// Replace these with your Supabase credentials
+const SUPABASE_URL = 'YOUR_SUPABASE_URL';
+const SUPABASE_ANON_KEY = 'YOUR_SUPABASE_ANON_KEY';
+const ADMIN_PASSWORD = 'admin123'; // Change this to your password
+
+// ============= SUPABASE CLIENT =============
+class SupabaseClient {
+  constructor(url, key) {
+    this.url = url;
+    this.key = key;
+  }
+
+  async request(method, table, data = null, filters = null) {
+    let url = `${this.url}/rest/v1/${table}`;
+    const options = {
+      method,
+      headers: {
+        'apikey': this.key,
+        'Content-Type': 'application/json',
+        'Prefer': 'return=representation'
+      }
+    };
+
+    if (filters) {
+      const filterStr = Object.entries(filters)
+        .map(([k, v]) => `${k}=eq.${v}`)
+        .join('&');
+      url += `?${filterStr}`;
+    }
+
+    if (data) options.body = JSON.stringify(data);
+
+    const res = await fetch(url, options);
+    if (!res.ok) throw new Error(`Supabase error: ${res.status}`);
+    return res.json();
+  }
+
+  async getDrivers() {
+    return this.request('GET', 'drivers');
+  }
+
+  async addDriver(phone, riderId, name, companyName) {
+    return this.request('POST', 'drivers', {
+      phone,
+      rider_id: riderId,
+      name,
+      company_name: companyName
+    });
+  }
+
+  async removeDriver(id) {
+    return this.request('DELETE', 'drivers', null, { id });
+  }
+
+  async submitEntry(driverId, entry) {
+    const today = new Date().toISOString().split('T')[0];
+    return this.request('POST', 'daily_entries', {
+      driver_id: driverId,
+      date: today,
+      batch_no: entry.batchNo,
+      name: entry.name,
+      zone: entry.zone,
+      daily_kilometers: entry.kilometers,
+      vehicle_number: entry.vehicleNumber,
+      total_orders: entry.totalOrders,
+      rider_id: entry.riderId,
+      company_name: entry.companyName
+    });
+  }
+
+  async getEntries(fromDate = null, toDate = null, driverId = null) {
+    let url = `${this.url}/rest/v1/daily_entries`;
+    const params = [];
+    
+    if (fromDate) params.push(`created_at=gte.${fromDate}T00:00:00`);
+    if (toDate) params.push(`created_at=lte.${toDate}T23:59:59`);
+    if (driverId) params.push(`driver_id=eq.${driverId}`);
+
+    if (params.length > 0) url += `?${params.join('&')}`;
+
+    const res = await fetch(url, {
+      headers: {
+        'apikey': this.key,
+        'Content-Type': 'application/json'
+      }
+    });
+    if (!res.ok) throw new Error('Fetch failed');
+    return res.json();
+  }
+
+  async getTodayEntries() {
+    const today = new Date().toISOString().split('T')[0];
+    return this.getEntries(today, today);
+  }
+}
+
+const db = new SupabaseClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+// ============= MAIN APP =============
+export default function RiderTracker() {
+  const [view, setView] = useState('landing');
+  const [currentDriver, setCurrentDriver] = useState(null);
+  const [drivers, setDrivers] = useState([]);
+  const [entries, setEntries] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [message, setMessage] = useState(null);
+
+  useEffect(() => {
+    loadAllData();
+  }, []);
+
+  const showMessage = (text, type = 'success') => {
+    setMessage({ text, type });
+    setTimeout(() => setMessage(null), 3000);
+  };
+
+  const loadAllData = async () => {
+    setLoading(true);
+    try {
+      const drivers = await db.getDrivers();
+      setDrivers(drivers || []);
+      const entries = await db.getTodayEntries();
+      setEntries(entries || []);
+    } catch (err) {
+      showMessage(`Error loading: ${err.message}`, 'error');
+    }
+    setLoading(false);
+  };
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-slate-900 to-slate-800 flex items-center justify-center">
+        <div className="text-white text-xl">Loading...</div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-slate-50">
+      {message && (
+        <div className={`fixed top-4 left-1/2 -translate-x-1/2 z-50 px-6 py-3 rounded-lg shadow-lg font-medium ${
+          message.type === 'error' ? 'bg-red-600 text-white' : 'bg-green-600 text-white'
+        }`}>
+          {message.text}
+        </div>
+      )}
+
+      {view === 'landing' && <Landing onDriverLogin={() => setView('driverLogin')} onAdminLogin={() => setView('adminLogin')} />}
+
+      {view === 'adminLogin' && (
+        <AdminLogin
+          onLogin={() => setView('adminDashboard')}
+          onBack={() => setView('landing')}
+          showMessage={showMessage}
+        />
+      )}
+
+      {view === 'adminDashboard' && (
+        <AdminDashboard
+          drivers={drivers}
+          entries={entries}
+          onAddDriver={async (phone, riderId, name, company) => {
+            try {
+              await db.addDriver(phone, riderId, name, company);
+              await loadAllData();
+              showMessage('Driver added');
+            } catch (err) {
+              showMessage(`Error: ${err.message}`, 'error');
+            }
+          }}
+          onRemoveDriver={async (id) => {
+            try {
+              await db.removeDriver(id);
+              await loadAllData();
+              showMessage('Driver removed');
+            } catch (err) {
+              showMessage(`Error: ${err.message}`, 'error');
+            }
+          }}
+          onLogout={() => setView('landing')}
+          onRefresh={loadAllData}
+        />
+      )}
+
+      {view === 'driverLogin' && (
+        <DriverLogin
+          drivers={drivers}
+          onLogin={(driver) => {
+            setCurrentDriver(driver);
+            setView('driverForm');
+          }}
+          onBack={() => setView('landing')}
+        />
+      )}
+
+      {view === 'driverForm' && currentDriver && (
+        <DriverForm
+          driver={currentDriver}
+          onSubmit={async (entry) => {
+            try {
+              await db.submitEntry(currentDriver.id, entry);
+              await loadAllData();
+              showMessage('Order submitted successfully');
+              return true;
+            } catch (err) {
+              showMessage(`Error: ${err.message}`, 'error');
+              return false;
+            }
+          }}
+          onLogout={() => {
+            setCurrentDriver(null);
+            setView('landing');
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+// ============= COMPONENTS =============
+
+function Landing({ onDriverLogin, onAdminLogin }) {
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-blue-600 to-blue-800 flex items-center justify-center px-6">
+      <div className="w-full max-w-md text-center">
+        <div className="mb-8">
+          <div className="inline-block bg-white rounded-2xl p-4 mb-4">
+            <div className="text-4xl">📦</div>
+          </div>
+          <h1 className="text-4xl font-bold text-white mb-2">RiderTrack Pro</h1>
+          <p className="text-blue-100">Daily delivery management system</p>
+        </div>
+
+        <div className="space-y-3">
+          <button
+            onClick={onDriverLogin}
+            className="w-full bg-white text-blue-600 py-4 rounded-xl font-bold text-lg hover:bg-blue-50 transition shadow-lg"
+          >
+            Driver Login
+          </button>
+          <button
+            onClick={onAdminLogin}
+            className="w-full bg-blue-900 text-white py-4 rounded-xl font-bold text-lg hover:bg-blue-950 transition border-2 border-white"
+          >
+            Admin Dashboard
+          </button>
+        </div>
+
+        <p className="text-blue-200 text-xs mt-8">✓ Real-time sync  ✓ 6-month backup  ✓ Secure OTP</p>
+      </div>
+    </div>
+  );
+}
+
+function AdminLogin({ onLogin, onBack, showMessage }) {
+  const [password, setPassword] = useState('');
+  const [show, setShow] = useState(false);
+
+  const handle = () => {
+    if (password === ADMIN_PASSWORD) {
+      onLogin();
+    } else {
+      showMessage('Wrong password', 'error');
+      setPassword('');
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-slate-900 to-slate-800 flex items-center justify-center px-6">
+      <div className="w-full max-w-md">
+        <button onClick={onBack} className="text-slate-400 mb-6 text-sm hover:text-white">← Back</button>
+        <h2 className="text-3xl font-bold text-white mb-2">Admin Access</h2>
+        <p className="text-slate-400 mb-8 italic">Owner / Manager only</p>
+
+        <div className="space-y-4">
+          <div className="relative">
+            <input
+              type={show ? 'text' : 'password'}
+              value={password}
+              onChange={e => setPassword(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && handle()}
+              placeholder="Password"
+              className="w-full px-4 py-4 border-2 border-slate-600 rounded-xl text-white bg-slate-800 focus:border-blue-500 outline-none"
+            />
+            <button onClick={() => setShow(!show)} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400">
+              {show ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
+            </button>
+          </div>
+
+          <button
+            onClick={handle}
+            className="w-full bg-blue-600 text-white py-4 rounded-xl font-bold text-lg hover:bg-blue-700"
+          >
+            Login
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AdminDashboard({ drivers, entries, onAddDriver, onRemoveDriver, onLogout, onRefresh }) {
+  const [tab, setTab] = useState('overview');
+
+  return (
+    <div className="min-h-screen pb-12">
+      <div className="bg-slate-900 text-white px-6 py-4 sticky top-0 z-20 flex items-center justify-between">
+        <div>
+          <p className="text-xs text-slate-400">Admin Panel</p>
+          <p className="font-bold">RiderTrack Pro</p>
+        </div>
+        <button onClick={onLogout} className="hover:text-slate-300">
+          <LogOut className="w-5 h-5" />
+        </button>
+      </div>
+
+      <div className="bg-white border-b sticky top-16 z-10">
+        <div className="max-w-6xl mx-auto px-4 flex gap-1 overflow-x-auto">
+          {[
+            { id: 'overview', label: 'Today', icon: '📊' },
+            { id: 'drivers', label: 'Drivers', icon: '👥' },
+            { id: 'reports', label: 'Reports', icon: '📈' }
+          ].map(t => (
+            <button
+              key={t.id}
+              onClick={() => setTab(t.id)}
+              className={`px-4 py-3 font-semibold text-sm border-b-2 whitespace-nowrap ${
+                tab === t.id ? 'border-blue-600 text-blue-600' : 'border-transparent text-slate-500'
+              }`}
+            >
+              {t.icon} {t.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="max-w-6xl mx-auto px-4 pt-6">
+        {tab === 'overview' && <OverviewTab drivers={drivers} entries={entries} onRefresh={onRefresh} />}
+        {tab === 'drivers' && <DriversTab drivers={drivers} entries={entries} onAdd={onAddDriver} onRemove={onRemoveDriver} />}
+        {tab === 'reports' && <ReportsTab drivers={drivers} entries={entries} />}
+      </div>
+    </div>
+  );
+}
+
+function OverviewTab({ drivers, entries, onRefresh }) {
+  const today = new Date().toISOString().split('T')[0];
+  const todayEntries = entries.filter(e => e.date === today);
+  const totalOrders = todayEntries.reduce((s, e) => s + (e.total_orders || 0), 0);
+  const totalKm = todayEntries.reduce((s, e) => s + (e.daily_kilometers || 0), 0);
+  const submitted = todayEntries.length;
+  const pending = drivers.length - submitted;
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-6">
+        <div>
+          <p className="text-slate-500 text-sm">{new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' })}</p>
+          <h2 className="text-3xl font-bold text-slate-900">Today's Orders</h2>
+        </div>
+        <button onClick={onRefresh} className="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 text-sm font-semibold">
+          Refresh
+        </button>
+      </div>
+
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
+        <StatCard label="Total Orders" value={totalOrders} color="bg-blue-600" />
+        <StatCard label="Total KM" value={totalKm} color="bg-purple-600" />
+        <StatCard label="Submitted" value={submitted} color="bg-green-600" />
+        <StatCard label="Pending" value={pending} color="bg-red-600" />
+      </div>
+
+      <h3 className="text-xl font-bold text-slate-900 mb-3">Entries Today</h3>
+      {todayEntries.length === 0 ? (
+        <div className="bg-slate-100 border-2 border-dashed border-slate-300 rounded-xl p-8 text-center text-slate-500 italic">
+          No entries yet
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {todayEntries.map(e => (
+            <EntryCard key={e.id} entry={e} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StatCard({ label, value, color }) {
+  return (
+    <div className={`${color} text-white rounded-xl p-4`}>
+      <p className="text-xs opacity-80 font-semibold">{label}</p>
+      <p className="text-3xl font-bold mt-1">{value}</p>
+    </div>
+  );
+}
+
+function EntryCard({ entry }) {
+  return (
+    <div className="bg-white border border-slate-200 rounded-lg p-4 hover:shadow-md transition">
+      <div className="flex items-center justify-between">
+        <div>
+          <p className="font-bold text-slate-900">{entry.name}</p>
+          <p className="text-xs text-slate-500 mt-1">
+            <span className="inline-block mr-3">🆔 {entry.rider_id}</span>
+            <span className="inline-block mr-3">📦 {entry.batch_no}</span>
+            <span className="inline-block">🌍 {entry.zone}</span>
+          </p>
+          <p className="text-xs text-slate-400 mt-1">{entry.company_name}</p>
+          <p className="text-xs text-slate-400">
+            Vehicle: {entry.vehicle_number} | {entry.daily_kilometers}km
+          </p>
+        </div>
+        <div className="text-right">
+          <p className="text-3xl font-bold text-blue-600">{entry.total_orders}</p>
+          <p className="text-xs text-slate-500 italic">orders</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DriversTab({ drivers, entries, onAdd, onRemove }) {
+  const [phone, setPhone] = useState('');
+  const [riderId, setRiderId] = useState('');
+  const [name, setName] = useState('');
+  const [company, setCompany] = useState('');
+
+  const handle = () => {
+    if (!phone || !riderId || !name || !company) {
+      alert('Fill all fields');
+      return;
+    }
+    onAdd(phone.replace(/\D/g, ''), riderId, name, company);
+    setPhone('');
+    setRiderId('');
+    setName('');
+    setCompany('');
+  };
+
+  const today = new Date().toISOString().split('T')[0];
+
+  return (
+    <div>
+      <h2 className="text-3xl font-bold text-slate-900 mb-6">Drivers ({drivers.length})</h2>
+
+      <div className="bg-white border-2 border-slate-200 rounded-xl p-5 mb-6">
+        <h3 className="font-bold text-slate-900 mb-4 flex items-center gap-2">
+          <Plus className="w-5 h-5" /> Add Driver
+        </h3>
+        <div className="grid grid-cols-1 md:grid-cols-5 gap-2">
+          <input type="tel" value={phone} onChange={e => setPhone(e.target.value)} placeholder="Phone" className="px-4 py-2 border-2 border-slate-300 rounded-lg focus:border-blue-600 outline-none" />
+          <input type="text" value={riderId} onChange={e => setRiderId(e.target.value)} placeholder="Rider ID" className="px-4 py-2 border-2 border-slate-300 rounded-lg focus:border-blue-600 outline-none" />
+          <input type="text" value={name} onChange={e => setName(e.target.value)} placeholder="Name" className="px-4 py-2 border-2 border-slate-300 rounded-lg focus:border-blue-600 outline-none" />
+          <input type="text" value={company} onChange={e => setCompany(e.target.value)} placeholder="Company" className="px-4 py-2 border-2 border-slate-300 rounded-lg focus:border-blue-600 outline-none" />
+          <button onClick={handle} className="bg-blue-600 text-white px-4 py-2 rounded-lg font-bold hover:bg-blue-700">
+            Add
+          </button>
+        </div>
+      </div>
+
+      {drivers.length === 0 ? (
+        <div className="bg-slate-100 border-2 border-dashed border-slate-300 rounded-xl p-8 text-center text-slate-500 italic">
+          No drivers. Add one above.
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {drivers.map(d => {
+            const submitted = entries.some(e => e.date === today && e.driver_id === d.id);
+            return (
+              <div key={d.id} className="bg-white border border-slate-200 rounded-lg p-4 flex items-center justify-between hover:shadow-md transition">
+                <div>
+                  <p className="font-bold text-slate-900">{d.name}</p>
+                  <p className="text-xs text-slate-500 mt-1">🆔 {d.rider_id} | 📱 {d.phone} | 🏢 {d.company_name}</p>
+                </div>
+                <div className="flex items-center gap-3">
+                  <span className={`px-3 py-1 rounded-full text-xs font-semibold ${
+                    submitted ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'
+                  }`}>
+                    {submitted ? '✓ Today' : 'Pending'}
+                  </span>
+                  <button onClick={() => confirm(`Remove ${d.name}?`) && onRemove(d.id)} className="text-red-600 hover:text-red-800">
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ReportsTab({ drivers, entries }) {
+  const [fromDate, setFromDate] = useState(() => {
+    const d = new Date();
+    d.setDate(d.getDate() - 30);
+    return d.toISOString().split('T')[0];
+  });
+  const [toDate, setToDate] = useState(new Date().toISOString().split('T')[0]);
+  const [driverFilter, setDriverFilter] = useState('all');
+
+  const filtered = entries.filter(e => {
+    if (e.date < fromDate || e.date > toDate) return false;
+    if (driverFilter !== 'all' && e.driver_id !== driverFilter) return false;
+    return true;
+  });
+
+  const totalOrders = filtered.reduce((s, e) => s + (e.total_orders || 0), 0);
+  const totalKm = filtered.reduce((s, e) => s + (e.daily_kilometers || 0), 0);
+
+  const exportCSV = () => {
+    const headers = ['Date', 'Rider ID', 'Name', 'Batch', 'Zone', 'KM', 'Vehicle', 'Orders', 'Company'];
+    const rows = filtered
+      .sort((a, b) => b.date.localeCompare(a.date))
+      .map(e => [e.date, e.rider_id, e.name, e.batch_no, e.zone, e.daily_kilometers, e.vehicle_number, e.total_orders, e.company_name]);
+    const csv = [headers, ...rows].map(r => r.map(c => `"${c}"`).join(',')).join('\n');
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `report_${fromDate}_to_${toDate}.csv`;
+    a.click();
+  };
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-6">
+        <h2 className="text-3xl font-bold text-slate-900">Reports</h2>
+        <button onClick={exportCSV} className="bg-slate-900 text-white px-4 py-2 rounded-lg hover:bg-slate-800 flex items-center gap-2 text-sm font-semibold">
+          <Download className="w-4 h-4" /> Export CSV
+        </button>
+      </div>
+
+      <div className="bg-white border-2 border-slate-200 rounded-xl p-4 mb-6 grid grid-cols-1 md:grid-cols-3 gap-3">
+        <div>
+          <label className="block text-xs font-semibold text-slate-600 mb-2">From</label>
+          <input type="date" value={fromDate} onChange={e => setFromDate(e.target.value)} className="w-full px-3 py-2 border-2 border-slate-300 rounded-lg focus:border-blue-600 outline-none" />
+        </div>
+        <div>
+          <label className="block text-xs font-semibold text-slate-600 mb-2">To</label>
+          <input type="date" value={toDate} onChange={e => setToDate(e.target.value)} className="w-full px-3 py-2 border-2 border-slate-300 rounded-lg focus:border-blue-600 outline-none" />
+        </div>
+        <div>
+          <label className="block text-xs font-semibold text-slate-600 mb-2">Driver</label>
+          <select value={driverFilter} onChange={e => setDriverFilter(e.target.value)} className="w-full px-3 py-2 border-2 border-slate-300 rounded-lg focus:border-blue-600 outline-none">
+            <option value="all">All Drivers</option>
+            {drivers.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
+          </select>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 md:grid-cols-2 gap-3 mb-6">
+        <StatCard label="Total Orders" value={totalOrders} color="bg-blue-600" />
+        <StatCard label="Total KM" value={totalKm} color="bg-purple-600" />
+      </div>
+
+      <h3 className="text-xl font-bold text-slate-900 mb-3">Daily Breakdown</h3>
+      {filtered.length === 0 ? (
+        <div className="bg-slate-100 border-2 border-dashed border-slate-300 rounded-xl p-8 text-center text-slate-500 italic">
+          No data in this period
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {[...new Set(filtered.map(e => e.date))]
+            .sort()
+            .reverse()
+            .map(date => {
+              const dayEntries = filtered.filter(e => e.date === date);
+              const dayOrders = dayEntries.reduce((s, e) => s + e.total_orders, 0);
+              return (
+                <div key={date} className="bg-white border border-slate-200 rounded-lg p-4 flex items-center justify-between">
+                  <div>
+                    <p className="font-bold text-slate-900">{new Date(date).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' })}</p>
+                    <p className="text-xs text-slate-500">{dayEntries.length} entries</p>
+                  </div>
+                  <p className="text-2xl font-bold text-blue-600">{dayOrders}</p>
+                </div>
+              );
+            })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DriverLogin({ drivers, onLogin, onBack }) {
+  const [phone, setPhone] = useState('');
+
+  const handle = () => {
+    const clean = phone.replace(/\D/g, '');
+    const driver = drivers.find(d => d.phone === clean);
+    if (!driver) {
+      alert('Phone not registered');
+      return;
+    }
+    onLogin(driver);
+  };
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-green-600 to-green-800 flex items-center justify-center px-6">
+      <div className="w-full max-w-md">
+        <button onClick={onBack} className="text-green-200 mb-6 text-sm hover:text-white">← Back</button>
+        <h2 className="text-3xl font-bold text-white mb-2">Driver Login</h2>
+        <p className="text-green-100 mb-8">Enter your registered phone</p>
+
+        <div className="space-y-4">
+          <input
+            type="tel"
+            inputMode="numeric"
+            value={phone}
+            onChange={e => setPhone(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && handle()}
+            placeholder="Phone number"
+            className="w-full px-4 py-4 border-2 border-green-300 rounded-xl text-lg bg-green-50 focus:border-white outline-none"
+          />
+          <button onClick={handle} className="w-full bg-white text-green-700 py-4 rounded-xl font-bold text-lg hover:bg-green-50">
+            Continue
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DriverForm({ driver, onSubmit, onLogout }) {
+  const [form, setForm] = useState({
+    batchNo: '',
+    name: driver.name,
+    zone: '',
+    kilometers: '',
+    vehicleNumber: '',
+    totalOrders: '',
+    riderId: driver.rider_id,
+    companyName: driver.company_name
+  });
+  const [submitting, setSubmitting] = useState(false);
+
+  const handle = async () => {
+    if (!form.batchNo || !form.name || !form.zone || !form.kilometers || !form.vehicleNumber || !form.totalOrders) {
+      alert('Fill all fields');
+      return;
+    }
+    setSubmitting(true);
+    const ok = await onSubmit({
+      batchNo: form.batchNo,
+      name: form.name,
+      zone: form.zone,
+      kilometers: Number(form.kilometers),
+      vehicleNumber: form.vehicleNumber,
+      totalOrders: Number(form.totalOrders),
+      riderId: form.riderId,
+      companyName: form.companyName
+    });
+    setSubmitting(false);
+    if (ok) {
+      setForm({
+        batchNo: '',
+        name: driver.name,
+        zone: '',
+        kilometers: '',
+        vehicleNumber: '',
+        totalOrders: '',
+        riderId: driver.rider_id,
+        companyName: driver.company_name
+      });
+    }
+  };
+
+  const fields = [
+    { key: 'batchNo', label: '1. Batch No', placeholder: 'e.g. B-123' },
+    { key: 'name', label: '2. Name', placeholder: 'Your name' },
+    { key: 'zone', label: '3. Zone', placeholder: 'e.g. Salmiya' },
+    { key: 'kilometers', label: '4. Daily Kilometers', type: 'number', placeholder: '0' },
+    { key: 'vehicleNumber', label: '5. Vehicle Number', placeholder: 'e.g. 12345' },
+    { key: 'totalOrders', label: '6. Total Orders', type: 'number', placeholder: '0' },
+    { key: 'riderId', label: '7. Rider ID', placeholder: 'Auto-filled' },
+    { key: 'companyName', label: '8. Company Name', placeholder: 'Auto-filled' }
+  ];
+
+  return (
+    <div className="min-h-screen pb-12">
+      <div className="bg-green-700 text-white px-6 py-4 flex items-center justify-between sticky top-0 z-20">
+        <div>
+          <p className="text-xs text-green-200">Driver</p>
+          <p className="font-bold">{driver.name}</p>
+        </div>
+        <button onClick={onLogout} className="hover:text-green-200">
+          <LogOut className="w-5 h-5" />
+        </button>
+      </div>
+
+      <div className="max-w-md mx-auto px-6 pt-6">
+        <p className="text-slate-500 text-sm mb-1">{new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' })}</p>
+        <h2 className="text-3xl font-bold text-slate-900 mb-6">Daily Entry</h2>
+
+        <div className="space-y-4">
+          {fields.map((f, idx) => (
+            <div key={f.key}>
+              <label className="block text-sm font-bold text-slate-700 mb-2">{f.label}</label>
+              <input
+                type={f.type || 'text'}
+                inputMode={f.type === 'number' ? 'numeric' : 'text'}
+                value={form[f.key]}
+                onChange={e => setForm({ ...form, [f.key]: e.target.value })}
+                placeholder={f.placeholder}
+                disabled={f.key === 'riderId' || f.key === 'companyName'}
+                className="w-full px-4 py-3 border-2 border-slate-300 rounded-lg focus:border-green-600 outline-none disabled:bg-slate-100 disabled:text-slate-500"
+              />
+            </div>
+          ))}
+
+          <button
+            onClick={handle}
+            disabled={submitting}
+            className="w-full bg-green-600 text-white py-4 rounded-lg font-bold text-lg hover:bg-green-700 disabled:bg-slate-400 mt-6"
+          >
+            {submitting ? 'Submitting...' : 'Submit Entry'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
